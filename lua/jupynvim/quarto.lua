@@ -633,9 +633,13 @@ function M.add_chunk(buf, where, lang)
 
   vim.api.nvim_buf_set_lines(buf, insert_at, insert_at, false, lines)
 
-  -- Land cursor on the empty code line of the new chunk.
-  local code_row = insert_at + (prev_blank and 0 or 1) + 1 + 1
-  pcall(vim.api.nvim_win_set_cursor, 0, { code_row, 0 })
+  -- Land cursor on the LANGUAGE name inside the opening fence so the user
+  -- can immediately type to override (e.g. `ciw` to change `python` → `r`)
+  -- or just press `j` to start editing the body.
+  -- Fence row (1-based) = insert_at + (prev_blank ? 0 : 1) + 1.
+  -- Column 4 (0-based) lands at the first char after "```{".
+  local fence_row = insert_at + (prev_blank and 0 or 1) + 1
+  pcall(vim.api.nvim_win_set_cursor, 0, { fence_row, 4 })
 
   M.refresh_chunks(buf)
 end
