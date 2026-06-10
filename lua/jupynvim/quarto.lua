@@ -458,7 +458,21 @@ function M.render(buf)
     end
 
     if #virt > 0 then
-      local row = ch.fence_close - 1  -- 0-based
+      -- Anchor row for outputs + footer. In "full" mode the closing fence
+      -- is concealed via `conceal_lines`, which also hides any virt_lines
+      -- attached to that row except when the cursor sits on it. Anchor to
+      -- the last visible code line instead so the footer is always shown.
+      local row
+      if mode == "full" then
+        row = ch.code_stop - 1
+        if row < ch.fence_open - 1 then
+          -- empty chunk: anchor below the (concealed) opening fence anyway —
+          -- there's no visible line inside the chunk to attach to.
+          row = ch.fence_open - 1
+        end
+      else
+        row = ch.fence_close - 1
+      end
       if row >= line_count then row = line_count - 1 end
       if row >= 0 then
         pcall(vim.api.nvim_buf_set_extmark, buf, st.output_ns, row, 0, {
