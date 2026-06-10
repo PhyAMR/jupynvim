@@ -101,11 +101,28 @@ local function ensure_client()
   return M.client
 end
 
+-- Public alias so peer modules (notably jupynvim.quarto) can grab the shared
+-- backend client without poking the locals in this file.
+function M._ensure_client() return ensure_client() end
+
+-- Is `buf` (0 = current) a Quarto (.qmd) buffer that's been attached?
+local function _qmd(buf)
+  if buf == 0 or buf == nil then buf = vim.api.nvim_get_current_buf() end
+  local ok, qm = pcall(require, "jupynvim.quarto")
+  if not ok then return nil end
+  return qm.get(buf) and qm or nil, buf
+end
+M._qmd = _qmd
+
 function M._handle_cell_event(p)
   if not p or not p.session_id then
     Log.warn("cell_event missing session_id: " .. vim.inspect(p):sub(1, 200))
     return
   end
+  -- Quarto (.qmd) sessions route through a parallel state store. Try it
+  -- first; if a qmd buffer claimed the session we're done.
+  local ok_qm, qmd = pcall(require, "jupynvim.quarto")
+  if ok_qm and qmd._handle_cell_event(p) then return end
   Log.debug("cell_event cell=" .. tostring(p.cell_id) .. " kind=" .. tostring(p.event and p.event.kind))
   for buf, nb in pairs(Notebook.all()) do
     if nb.session_id == p.session_id then
@@ -892,6 +909,8 @@ end
 
 function M.run_cell(buf, opts)
   opts = opts or {}
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.run_cell(qbuf, M, opts) end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()
@@ -924,6 +943,8 @@ function M.run_cell(buf, opts)
 end
 
 function M.run_all(buf)
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.run_all(qbuf, M) end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()
@@ -947,55 +968,47 @@ function M.run_all(buf)
 end
 
 function M.run_above(buf)
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.run_above(qbuf, M) end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()
   local lnum = vim.api.nvim_win_get_cursor(0)[1]
   local cur_id = nb:cell_at_line(lnum)
-  local co
-  co = coroutine.wrap(function()
-    for _, c in ipairs(nb.cells) do
-      if c.id == cur_id then break end
-      if c.cell_type == "code" then
-        local cl = ensure_client()
-        cl:call("update_cell_source", { session_id = nb.session_id, cell_id = c.id, source = c.source }, function()
-          cl:call("execute", { session_id = nb.session_id, cell_id = c.id }, function()
-            co()
-          end)
-        end)
-        coroutine.yield()
-      end
+  for _, c in ipairs(nb.cells) do
+    if c.id == cur_id then break end
+    if c.cell_type == "code" then
+      local cl = ensure_client()
+      cl:call("update_cell_source", { session_id = nb.session_id, cell_id = c.id, source = c.source }, function() end)
+      cl:call("execute", { session_id = nb.session_id, cell_id = c.id }, function() end)
     end
-  end)
-  co()
+  end
 end
 
 function M.run_below(buf)
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.run_below(qbuf, M) end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()
   local lnum = vim.api.nvim_win_get_cursor(0)[1]
   local cur_id = nb:cell_at_line(lnum)
   local seen = false
-  local co
-  co = coroutine.wrap(function()
-    for _, c in ipairs(nb.cells) do
-      if c.id == cur_id then seen = true end
-      if seen and c.cell_type == "code" then
-        local cl = ensure_client()
-        cl:call("update_cell_source", { session_id = nb.session_id, cell_id = c.id, source = c.source }, function()
-          cl:call("execute", { session_id = nb.session_id, cell_id = c.id }, function()
-            co()
-          end)
-        end)
-        coroutine.yield()
-      end
+  for _, c in ipairs(nb.cells) do
+    if c.id == cur_id then seen = true end
+    if seen and c.cell_type == "code" then
+      local cl = ensure_client()
+      cl:call("update_cell_source", { session_id = nb.session_id, cell_id = c.id, source = c.source }, function() end)
+      cl:call("execute", { session_id = nb.session_id, cell_id = c.id }, function() end)
     end
-  end)
-  co()
+  end
 end
 
 function M.add_cell(buf, where)
+  if _qmd(buf) then
+    vim.notify("jupynvim qmd: edit the .qmd source directly to add a chunk", vim.log.levels.INFO)
+    return
+  end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()
@@ -1025,6 +1038,7 @@ function M.add_cell(buf, where)
 end
 
 function M.delete_cell(buf)
+  if _qmd(buf) then return end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()
@@ -1052,6 +1066,7 @@ function M.delete_cell(buf)
 end
 
 function M.move_cell(buf, delta)
+  if _qmd(buf) then return end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()
@@ -1074,6 +1089,7 @@ function M.move_cell(buf, delta)
 end
 
 function M.set_cell_type(buf, t)
+  if _qmd(buf) then return end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()
@@ -1141,6 +1157,8 @@ function M._sync_lsp_python_path(buf, py_path, extra_paths)
 end
 
 function M.start_kernel(buf, kernel_name)
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.start_kernel(qbuf, M, kernel_name) end
   local nb = Notebook.get(buf)
   if not nb then return end
   -- Don't auto-restart if a kernel is already running for this notebook.
@@ -1214,6 +1232,8 @@ function M.start_kernel(buf, kernel_name)
 end
 
 function M.stop_kernel(buf)
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.stop_kernel(qbuf, M) end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb.kernel_started = false
@@ -1221,6 +1241,8 @@ function M.stop_kernel(buf)
 end
 
 function M.interrupt_kernel(buf)
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.interrupt_kernel(qbuf, M) end
   local nb = Notebook.get(buf)
   if not nb then return end
   ensure_client():call("interrupt_kernel", { session_id = nb.session_id }, function() end)
@@ -1230,6 +1252,8 @@ end
 -- Markdown cells (and their embedded images) are left untouched. Mirrors
 -- `jupyter nbconvert --clear-output --inplace`.
 function M.clear_outputs(buf)
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.clear_outputs(qbuf, M) end
   local nb = Notebook.get(buf)
   if not nb then return end
   local Image = require("jupynvim.image")
@@ -1264,6 +1288,8 @@ end
 
 -- Clear outputs of just the cell under the cursor.
 function M.clear_cell_output(buf)
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.clear_cell_output(qbuf, M) end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()
@@ -1296,6 +1322,8 @@ function M.clear_cell_output(buf)
 end
 
 function M.restart_kernel(buf)
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.restart_kernel(qbuf, M) end
   local nb = Notebook.get(buf)
   if not nb then return end
   ensure_client():call("restart_kernel", { session_id = nb.session_id }, function(err, res)
@@ -1310,6 +1338,7 @@ end
 -- the cell source. On save, postprocess() won't find the placeholder and
 -- the original base64 data drops out of the .ipynb on disk.
 function M.delete_image(buf)
+  if _qmd(buf) then return end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()
@@ -1357,6 +1386,8 @@ function M.delete_image(buf)
 end
 
 function M.kernel_picker(buf)
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.kernel_picker(qbuf, M) end
   ensure_client():call("list_kernels", {}, function(err, kernels)
     if err then vim.notify("list_kernels: " .. err, vim.log.levels.ERROR); return end
     vim.ui.select(kernels, {
@@ -1476,6 +1507,7 @@ end
 -- so when the cursor is below an output region, this key enters that
 -- region. From inside the scratch split, either key (or q) returns.
 function M.enter_output(buf, direction)
+  if _qmd(buf) then return end
   -- Already inside a jupynvim output scratch? Close and return.
   local ok, _ = pcall(vim.api.nvim_buf_get_var, buf, "jupynvim_origin_buf")
   if ok then
@@ -1525,6 +1557,7 @@ end
 -- Save the current cell's image (markdown embedded or code-cell output)
 -- to a file. Format inferred from image/png vs image/jpeg vs image/gif.
 function M.save_image(buf, path)
+  if _qmd(buf) then return end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()
@@ -1592,6 +1625,7 @@ function M.toggle_output(buf) M.enter_output(buf, "down") end
 -- a markdown embedded image or a code-cell image output. delta > 0 moves
 -- forward, delta < 0 moves backward.
 function M.jump_image(buf, delta)
+  if _qmd(buf) then return end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()
@@ -1632,6 +1666,8 @@ function M.jump_image(buf, delta)
 end
 
 function M.jump_cell(buf, delta, advance_to_end)
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.jump_chunk(qbuf, delta) end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()
@@ -1657,6 +1693,8 @@ function M.jump_cell(buf, delta, advance_to_end)
 end
 
 function M.refresh(buf)
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.render(qbuf) end
   local nb = Notebook.get(buf)
   if nb then Render.refresh(nb, vim.fn.bufwinid(buf)) end
 end
@@ -1729,6 +1767,26 @@ function M.setup(opts)
     callback = function(args)
       -- New file: defer-create with empty notebook
       vim.schedule(function() M.open(args.file) end)
+    end,
+  })
+
+  -- Quarto (.qmd) attach. Unlike .ipynb we don't hijack BufReadCmd — the
+  -- file stays a normal markdown buffer. We attach our chunk-execution layer
+  -- on FileType so users still edit the .qmd source directly.
+  vim.api.nvim_create_autocmd({ "FileType", "BufRead", "BufNewFile" }, {
+    group = group,
+    pattern = { "quarto", "*.qmd" },
+    callback = function(args)
+      local buf = args.buf or vim.api.nvim_get_current_buf()
+      local name = vim.api.nvim_buf_get_name(buf)
+      -- Only attach for real .qmd files. The `quarto` filetype is shared
+      -- with the quarto-nvim plugin and matches non-file buffers too.
+      if name == "" or not name:match("%.qmd$") then return end
+      vim.schedule(function()
+        if vim.api.nvim_buf_is_valid(buf) then
+          require("jupynvim.quarto").attach(buf, M)
+        end
+      end)
     end,
   })
 
