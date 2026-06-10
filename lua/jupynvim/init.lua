@@ -41,6 +41,23 @@ M.config = {
   -- `ipykernel install --user` in every uv/poetry/pdm project. Set false
   -- to keep the old behavior of using only registered kernelspecs.
   auto_venv = true,
+  -- Visual decoration for executable chunks in .qmd buffers. All modes are
+  -- pure virtual display — the actual file on disk is never modified, so
+  -- `quarto render`, git, and other tools see the unchanged source.
+  --
+  --   "off"   — plain markdown, no extra decoration
+  --   "soft"  — top + bottom virt_line borders around the existing fences
+  --             (fences stay visible)
+  --   "full"  — conceal both fence lines, draw a full virtual box with side
+  --             bars on every code line (closest to the .ipynb look)
+  --   "signs" — "│" in the sign column down every line of the chunk plus
+  --             top/bottom virt_line borders
+  --   "tint"  — subtle background highlight on chunk body + a small
+  --             "[lang]" header above the opening fence (VSCode-style)
+  --
+  -- Toggle live with `:JupynvimQmdBorders {mode}` or cycle with
+  -- `:JupynvimQmdBorders` (no arg).
+  qmd_borders = "tint",  -- "off" | "soft" | "full" | "signs" | "tint"
   -- LSP server names that should NOT attach to jupynvim buffers. Empty
   -- by default: users opt in for the ones that misbehave.
   --
@@ -1815,6 +1832,28 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("JupynvimKernel", function() M.kernel_picker(0) end, {})
   vim.api.nvim_create_user_command("JupynvimRestart", function() M.restart_kernel(0) end, {})
   vim.api.nvim_create_user_command("JupynvimClearOutputs", function() M.clear_outputs(0) end, {})
+
+  -- Switch the .qmd chunk decoration mode live. With no argument cycles
+  -- through off → soft → full → signs → tint → off so you can preview each.
+  vim.api.nvim_create_user_command("JupynvimQmdBorders", function(o)
+    local arg = (o.args or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local qm, qbuf = _qmd(0)
+    if not qm then
+      vim.notify("jupynvim: not a .qmd buffer", vim.log.levels.INFO)
+      return
+    end
+    local want
+    if arg == "" or arg == "cycle" or arg == "toggle" then
+      want = nil  -- cycle
+    else
+      want = arg
+    end
+    local now = qm.set_border_mode(qbuf, want)
+    vim.notify("jupynvim qmd borders: " .. now, vim.log.levels.INFO)
+  end, {
+    nargs = "?",
+    complete = function() return { "off", "soft", "full", "signs", "tint", "cycle" } end,
+  })
   vim.api.nvim_create_user_command("JupynvimClearCellOutput", function() M.clear_cell_output(0) end, {})
 
   -- Nuclear reset: close all sessions, wipe all notebook buffers, reload from disk.

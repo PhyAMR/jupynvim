@@ -653,6 +653,11 @@ function M.setup_highlights()
   hl(0, HL_MARKDOWN,  { bg = "#1a1b26" })
   hl(0, "JupynvimCellBg", { bg = "#16161e" })
   hl(0, "JupynvimSeparator", { fg = "#414868" })
+  -- Subtle chunk-body tint used by the Quarto "tint" border mode (Option D).
+  -- Default is a soft bg link to CursorLine, which most colorschemes set to
+  -- a barely-visible tint of Normal. Users can override with their own
+  -- `JupynvimQmdChunkBg` highlight if they prefer a different shade.
+  hl(0, "JupynvimQmdChunkBg", { link = "CursorLine", default = true })
   -- Define the sign used for the left cell-border bar.
   pcall(vim.fn.sign_define, "JupynvimBar", { text = "│", texthl = HL_BORDER })
   require("jupynvim.markdown").setup_hl()

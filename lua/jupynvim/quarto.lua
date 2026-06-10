@@ -195,26 +195,277 @@ local function clear_output_marks(buf)
   pcall(vim.api.nvim_buf_clear_namespace, buf, st.output_ns, 0, -1)
 end
 
+-- ---------- borders ----------
+--
+-- Five visual modes for .qmd chunks:
+--   "off"   — plain markdown, no extra decoration
+--   "soft"  — top + bottom virt_lines flanking the existing fences (A)
+--   "full"  — fences concealed; full virtual box with side bars (B)
+--   "signs" — sign-column "│" running down the chunk + top/bottom borders (C)
+--   "tint"  — subtle background highlight on chunk body + small header (D)
+--
+-- All modes are pure display state. The buffer text is never modified, so
+-- `quarto render`, git, and other tools see exactly the .qmd on disk.
+
+local HL_BORDER  = "JupynvimBorder"
+local HL_HEADER  = "JupynvimCellHeader"
+local HL_CHUNKBG = "JupynvimQmdChunkBg"
+
+local function dw(s) return vim.fn.strdisplaywidth(s) end
+
+-- Width to draw the border across. Use the window currently showing the
+-- buffer, falling back to 80 if the buffer is not visible.
+local function border_width(buf)
+  local win = vim.fn.bufwinid(buf)
+  if win == -1 then return 80 end
+  local w = vim.api.nvim_win_get_width(win)
+  local info = vim.fn.getwininfo(win)[1]
+  if info then w = w - (info.textoff or 0) end
+  if w < 20 then w = 20 end
+  return w
+end
+
+local function header_text(badge, label, state, width)
+  local mid = state and (" (" .. state .. ")") or ""
+  local main = "┌─ [" .. badge .. "] " .. label .. mid .. " "
+  local pad  = width - dw(main) - 1
+  if pad < 0 then pad = 0 end
+  return main .. string.rep("─", pad) .. "┐"
+end
+
+local function footer_text(width)
+  return "└" .. string.rep("─", math.max(width - 2, 0)) .. "┘"
+end
+
+-- Compact one-line header used by "tint" mode (no box corners).
+local function tint_header_text(badge, label, state, width)
+  local mid = state and (" (" .. state .. ")") or ""
+  local main = "  [" .. badge .. "] " .. label .. mid
+  return main
+end
+
+-- Current border MODE for the buffer. Buffer-local override beats config.
+function M.border_mode(buf)
+  local st = quartos[buf]
+  if not st then return "off" end
+  if st.border_mode then return st.border_mode end
+  local ok, jn = pcall(require, "jupynvim")
+  if ok and jn.config and jn.config.qmd_borders then
+    return jn.config.qmd_borders
+  end
+  return "off"
+end
+
+local VALID_MODES = { off = true, soft = true, full = true, signs = true, tint = true }
+
+-- Set border mode for this buffer. Pass nil to cycle through the modes.
+function M.set_border_mode(buf, mode)
+  local st = quartos[buf]
+  if not st then return "off" end
+  if mode == nil then
+    local order = { "off", "soft", "full", "signs", "tint" }
+    local cur = M.border_mode(buf)
+    local idx = 1
+    for i, m in ipairs(order) do if m == cur then idx = i; break end end
+    mode = order[(idx % #order) + 1]
+  elseif not VALID_MODES[mode] then
+    vim.notify("jupynvim: unknown border mode '" .. tostring(mode)
+      .. "' (expected off|soft|full|signs|tint)", vim.log.levels.WARN)
+    return M.border_mode(buf)
+  end
+  st.border_mode = mode
+  M.render(buf)
+  return mode
+end
+
+-- Build the execution-badge string and an optional state suffix for a cell.
+local function badge_for(cell_state)
+  if not cell_state then return "*", nil end
+  local b = cell_state.execution_count and tostring(cell_state.execution_count) or "*"
+  local s
+  if cell_state.exec_state and cell_state.exec_state ~= "idle" then
+    s = cell_state.exec_state
+  end
+  return b, s
+end
+
+-- Per-mode renderers. Each adds extmarks for ONE chunk; the dispatcher in
+-- M.render walks every chunk and calls the active mode. Output virt_lines
+-- (build_virt_lines) are appended by the caller — modes only own borders.
+
+-- Option A — soft: virt_line above opening fence, virt_line below outputs.
+-- Fences stay visible.
+local function render_soft(buf, st, ch, idx, cell_state, width, append_footer)
+  local badge, state_s = badge_for(cell_state)
+  local top_row = ch.fence_open - 1
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  if top_row >= 0 and top_row < line_count then
+    pcall(vim.api.nvim_buf_set_extmark, buf, st.output_ns, top_row, 0, {
+      virt_lines = { { { header_text(badge, ch.lang, state_s, width), HL_HEADER } } },
+      virt_lines_above = true,
+      priority = 90,
+    })
+  end
+  append_footer({ { footer_text(width), HL_BORDER } })
+end
+
+-- Option B — full: conceal both fence lines, draw a virtual top border above
+-- the first code line, side bars on every code line, bottom border below the
+-- last code line / outputs. Requires Neovim 0.11 for `conceal_lines`.
+local function render_full(buf, st, ch, idx, cell_state, width, append_footer)
+  local badge, state_s = badge_for(cell_state)
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  -- Conceal opening + closing fences entirely
+  pcall(vim.api.nvim_buf_set_extmark, buf, st.output_ns, ch.fence_open - 1, 0, {
+    conceal_lines = "",
+    priority = 80,
+  })
+  pcall(vim.api.nvim_buf_set_extmark, buf, st.output_ns, ch.fence_close - 1, 0, {
+    conceal_lines = "",
+    priority = 80,
+  })
+  -- Header above first VISIBLE row (i.e. first code line, since the opening
+  -- fence is concealed). Fall back to the fence row if the chunk is empty.
+  local first_code = ch.code_start - 1   -- 0-based
+  if first_code > ch.code_stop - 1 then
+    first_code = ch.fence_open - 1
+  end
+  if first_code >= 0 and first_code < line_count then
+    pcall(vim.api.nvim_buf_set_extmark, buf, st.output_ns, first_code, 0, {
+      virt_lines = { { { header_text(badge, ch.lang, state_s, width), HL_HEADER } } },
+      virt_lines_above = true,
+      priority = 90,
+    })
+  end
+  -- Side bars on every code line: "│ " inline at column 0 (visual indent)
+  -- and "│" right-aligned. This matches the .ipynb cell visual.
+  for row = ch.code_start - 1, ch.code_stop - 1 do
+    if row >= 0 and row < line_count then
+      pcall(vim.api.nvim_buf_set_extmark, buf, st.output_ns, row, 0, {
+        virt_text     = { { "│ ", HL_BORDER } },
+        virt_text_pos = "inline",
+        priority      = 85,
+      })
+      pcall(vim.api.nvim_buf_set_extmark, buf, st.output_ns, row, 0, {
+        virt_text     = { { "│", HL_BORDER } },
+        virt_text_pos = "right_align",
+        priority      = 85,
+      })
+    end
+  end
+  append_footer({ { footer_text(width), HL_BORDER } })
+end
+
+-- Option C — signs: sign-column "│" runs down every line of the chunk
+-- (fences included). Plus the same top/bottom virt_line borders as soft mode.
+local function render_signs(buf, st, ch, idx, cell_state, width, append_footer)
+  local badge, state_s = badge_for(cell_state)
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  for row = ch.fence_open - 1, ch.fence_close - 1 do
+    if row >= 0 and row < line_count then
+      pcall(vim.api.nvim_buf_set_extmark, buf, st.output_ns, row, 0, {
+        sign_text     = "│",
+        sign_hl_group = HL_BORDER,
+        priority      = 85,
+      })
+    end
+  end
+  local top_row = ch.fence_open - 1
+  if top_row >= 0 and top_row < line_count then
+    pcall(vim.api.nvim_buf_set_extmark, buf, st.output_ns, top_row, 0, {
+      virt_lines = { { { header_text(badge, ch.lang, state_s, width), HL_HEADER } } },
+      virt_lines_above = true,
+      priority = 90,
+    })
+  end
+  append_footer({ { footer_text(width), HL_BORDER } })
+end
+
+-- Option D — tint: subtle background highlight on every line of the chunk
+-- body (fences excluded), a small "[lang]" header above the opening fence,
+-- no bottom border. The most VSCode-like look.
+local function render_tint(buf, st, ch, idx, cell_state, width, append_footer)
+  local badge, state_s = badge_for(cell_state)
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  for row = ch.fence_open - 1, ch.fence_close - 1 do
+    if row >= 0 and row < line_count then
+      pcall(vim.api.nvim_buf_set_extmark, buf, st.output_ns, row, 0, {
+        line_hl_group = HL_CHUNKBG,
+        priority      = 80,
+      })
+    end
+  end
+  local top_row = ch.fence_open - 1
+  if top_row >= 0 and top_row < line_count then
+    pcall(vim.api.nvim_buf_set_extmark, buf, st.output_ns, top_row, 0, {
+      virt_lines = { { { tint_header_text(badge, ch.lang, state_s, width), HL_HEADER } } },
+      virt_lines_above = true,
+      priority = 90,
+    })
+  end
+  -- Tint mode intentionally has no bottom border: append_footer is a no-op.
+end
+
 function M.render(buf)
   local st = quartos[buf]
   if not st then return end
   clear_output_marks(buf)
   local line_count = vim.api.nvim_buf_line_count(buf)
-  for idx, ch in ipairs(st.chunks) do
-    local cell_id = st.cell_ids[idx]
-    local cell_state = cell_id and st.cell_state[cell_id]
-    if cell_state then
-      local virt = build_virt_lines(buf, st, idx, cell_state)
-      if #virt > 0 then
-        local row = ch.fence_close - 1  -- 0-based
-        if row >= line_count then row = line_count - 1 end
-        if row >= 0 then
-          pcall(vim.api.nvim_buf_set_extmark, buf, st.output_ns, row, 0, {
-            virt_lines = virt,
-            virt_lines_above = false,
-            priority = 100,
-          })
+  local mode  = M.border_mode(buf)
+  local width = border_width(buf)
+
+  -- "full" mode uses `conceal_lines` (Neovim 0.11+) which requires
+  -- conceallevel >= 1. Set it window-locally on any window showing this
+  -- buffer; restore (best-effort) when leaving full mode.
+  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+    pcall(function()
+      if mode == "full" then
+        if not st._saved_conceallevel then
+          st._saved_conceallevel = vim.api.nvim_get_option_value(
+            "conceallevel", { win = win })
         end
+        vim.api.nvim_set_option_value("conceallevel", 2, { win = win })
+      elseif st._saved_conceallevel ~= nil then
+        vim.api.nvim_set_option_value("conceallevel", st._saved_conceallevel,
+          { win = win })
+        st._saved_conceallevel = nil
+      end
+    end)
+  end
+
+  local renderer = ({
+    soft  = render_soft,
+    full  = render_full,
+    signs = render_signs,
+    tint  = render_tint,
+  })[mode]
+
+  for idx, ch in ipairs(st.chunks) do
+    local cell_id    = st.cell_ids[idx]
+    local cell_state = cell_id and st.cell_state[cell_id]
+
+    -- Outputs + (optional) bottom-border footer share one extmark anchored
+    -- to the closing fence. The mode renderer pushes the footer line via
+    -- append_footer; modes that don't have a footer (tint) just don't call it.
+    local virt = {}
+    if cell_state then
+      virt = build_virt_lines(buf, st, idx, cell_state)
+    end
+    local function append_footer(line) table.insert(virt, line) end
+
+    if renderer then
+      renderer(buf, st, ch, idx, cell_state, width, append_footer)
+    end
+
+    if #virt > 0 then
+      local row = ch.fence_close - 1  -- 0-based
+      if row >= line_count then row = line_count - 1 end
+      if row >= 0 then
+        pcall(vim.api.nvim_buf_set_extmark, buf, st.output_ns, row, 0, {
+          virt_lines = virt,
+          virt_lines_above = false,
+          priority = 100,
+        })
       end
     end
   end
@@ -838,6 +1089,16 @@ function M.attach(buf, api)
   vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
     group = group, buffer = buf,
     callback = function() M.refresh_chunks(buf) end,
+  })
+  -- Borders are window-width-dependent — re-render on resize / window switch
+  -- so the right edge keeps lining up.
+  vim.api.nvim_create_autocmd({ "WinResized", "VimResized", "WinEnter", "BufWinEnter" }, {
+    group = group, buffer = buf,
+    callback = function()
+      vim.schedule(function()
+        if vim.api.nvim_buf_is_valid(buf) then M.render(buf) end
+      end)
+    end,
   })
   vim.api.nvim_create_autocmd("BufWipeout", {
     group = group, buffer = buf,
