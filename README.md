@@ -47,6 +47,12 @@ https://github.com/user-attachments/assets/36bdca18-c964-423c-8c99-6f243d4ac1b2
   `python -m ipykernel install --user --name foo` per project.
 - Multi-image markdown cells are supported. `<leader>nD` deletes one image
   and `u` brings it back.
+- Quarto (`.qmd`) cell execution without a render step. Open any `.qmd` and
+  the same `<S-CR>` / `<leader>nr` keymaps run the code chunk under your
+  cursor against a Jupyter kernel; outputs (text, errors, images) appear as
+  ephemeral virtual lines below the chunk's closing fence. The buffer stays
+  a plain markdown file on disk — nothing is rewritten, nothing is saved
+  back. See [Quarto support](#quarto-qmd-support) below.
 - One Rust binary, one Lua plugin. No `pynvim`, no `jupyter_client`, no
   `image.nvim`, no Node-based notebook server.
 
@@ -235,6 +241,63 @@ an `.ipynb`.
 | `<leader>ni` | Interrupt kernel |
 | `<leader>nx` | Restart kernel |
 | `<leader>nL` | Force re-render |
+
+## Quarto (.qmd) support
+
+Quarto files are real markdown on disk. jupynvim does not hijack the buffer
+the way it does for `.ipynb` — you edit the `.qmd` source directly. What it
+adds is the cell-execution layer: every fenced block of the form
+
+````
+```{python}
+import numpy as np
+np.arange(5)
+```
+````
+
+becomes an executable chunk. Move the cursor into it, press `<S-CR>` (or
+`<leader>nr`), and the code runs against a Jupyter kernel. Output renders as
+virtual lines immediately below the closing ```` ``` ```` — text, tracebacks,
+and inline images (Kitty graphics) all work the same way they do in `.ipynb`.
+
+Output is **ephemeral**. It lives in extmarks attached to the buffer, never in
+the file. Close the buffer, `:JupynvimClearOutputs`, or restart the kernel
+and it goes away. The on-disk `.qmd` is never modified by jupynvim, so it
+still renders correctly with `quarto render` or `quarto preview` when you
+want a real document.
+
+Supported keymaps (all buffer-local, same defaults as `.ipynb`):
+
+| Key | Action |
+|---|---|
+| `<S-CR>` / `<leader>nr` | Run chunk, advance to next |
+| `<C-CR>` | Run chunk, stay |
+| `<leader>nR` | Run all chunks |
+| `<leader>nA` / `<leader>nB` | Run all chunks above / below cursor |
+| `]c` / `[c` | Jump to next / previous chunk |
+| `<leader>nc` / `<leader>nC` | Clear current chunk output / all outputs |
+| `<leader>nK` | Pick kernel |
+| `<leader>ns` / `<leader>nS` / `<leader>ni` / `<leader>nx` | Start / stop / interrupt / restart kernel |
+
+Kernel selection in priority order:
+
+1. `:JupynvimKernel` picker if you used it manually.
+2. YAML front-matter: `jupyter: <kernel-name>` or `kernel: <name>` inside
+   the leading `---` block.
+3. Language of the first executable chunk (`python`, `r`, `julia`, ...) is
+   matched against the languages reported by `jupyter kernelspec list`.
+4. For Python: same `.venv` autodetection used for `.ipynb` (set
+   `auto_venv = false` in setup to disable).
+
+Things that are not supported on `.qmd` because they don't map cleanly:
+`:JupynvimRunCell`'s cell add/delete/move/type-change actions just notify
+you to edit the source directly. Embedded-image extraction and the output
+scratch split are also `.ipynb`-only for now.
+
+Multi-language Quarto documents (Python *and* R chunks in the same file)
+attach a single kernel matched to the first chunk's language; chunks in
+other languages will send their source to that kernel and likely error.
+Per-chunk kernel selection is a possible future addition.
 
 ## Configuration
 
