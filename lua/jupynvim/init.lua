@@ -1005,10 +1005,8 @@ function M.run_below(buf)
 end
 
 function M.add_cell(buf, where)
-  if _qmd(buf) then
-    vim.notify("jupynvim qmd: edit the .qmd source directly to add a chunk", vim.log.levels.INFO)
-    return
-  end
+  local qm, qbuf = _qmd(buf)
+  if qm then return qm.add_chunk(qbuf, where) end
   local nb = Notebook.get(buf)
   if not nb then return end
   nb:sync_from_buffer()

@@ -567,6 +567,79 @@ function M.jump_chunk(buf, delta)
   pcall(vim.api.nvim_win_set_cursor, 0, { row, 0 })
 end
 
+-- ---------- chunk insertion ----------
+
+-- Pick a language for a brand-new chunk. Priority:
+--   1. explicit `lang` arg
+--   2. language of the chunk the cursor is currently in
+--   3. language of the first chunk in the file
+--   4. kernel language already in use
+--   5. "python" as last resort
+local function default_new_lang(buf, st, cursor_lnum, lang)
+  if lang and lang ~= "" then return lang end
+  local idx = cursor_lnum and M.chunk_at_line(buf, cursor_lnum)
+  if idx and st.chunks[idx] then return st.chunks[idx].lang end
+  if st.chunks[1] then return st.chunks[1].lang end
+  if st.kernel_lang then return st.kernel_lang end
+  return "python"
+end
+
+-- Insert a new code chunk above/below the current one. The buffer is treated
+-- as ordinary markdown — we just splice text in. Cursor lands on the empty
+-- code line inside the fresh chunk so the user can start typing.
+--
+-- `where` is "above" or "below". `lang` is optional; auto-picked if nil.
+function M.add_chunk(buf, where, lang)
+  local st = quartos[buf]
+  if not st then return end
+  M.refresh_chunks(buf, { skip_render = true })
+
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local idx = M.chunk_at_line(buf, lnum)
+  local picked_lang = default_new_lang(buf, st, lnum, lang)
+
+  -- Decide the 0-based row to insert AT (vim.api.nvim_buf_set_lines start row).
+  -- The new text replaces zero existing lines, so set_lines(insert_at,
+  -- insert_at, ...) pushes everything from `insert_at` downward.
+  local insert_at
+  if idx then
+    local ch = st.chunks[idx]
+    if where == "above" then
+      insert_at = ch.fence_open - 1
+    else
+      insert_at = ch.fence_close
+    end
+  else
+    if where == "above" then
+      insert_at = math.max(lnum - 1, 0)
+    else
+      insert_at = lnum
+    end
+  end
+
+  -- Pad with blank lines so the new fence doesn't fuse with adjacent prose or
+  -- another fence. Skip the pad on either side if there's already a blank
+  -- neighbour (or we're at the edge of the file).
+  local existing = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local prev_blank = insert_at == 0 or (existing[insert_at] or "") == ""
+  local next_blank = insert_at >= #existing or (existing[insert_at + 1] or "") == ""
+
+  local lines = {}
+  if not prev_blank then table.insert(lines, "") end
+  table.insert(lines, "```{" .. picked_lang .. "}")
+  table.insert(lines, "")
+  table.insert(lines, "```")
+  if not next_blank then table.insert(lines, "") end
+
+  vim.api.nvim_buf_set_lines(buf, insert_at, insert_at, false, lines)
+
+  -- Land cursor on the empty code line of the new chunk.
+  local code_row = insert_at + (prev_blank and 0 or 1) + 1 + 1
+  pcall(vim.api.nvim_win_set_cursor, 0, { code_row, 0 })
+
+  M.refresh_chunks(buf)
+end
+
 -- ---------- clear outputs ----------
 
 function M.clear_outputs(buf, api)
